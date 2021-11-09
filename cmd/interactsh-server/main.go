@@ -39,6 +39,15 @@ func main() {
 	flag.StringVar(&options.Token, "token", "", "Enable authentication to server using given token")
 	flag.StringVar(&options.OriginURL, "origin-url", "https://app.interactsh.com", "Origin URL to send in ACAO Header")
 	flag.BoolVar(&options.RootTLD, "root-tld", false, "Enable wildcard/global interaction for *.domain.com")
+	options.Proxy = make(map[string]string)
+	flag.Func("proxy", "HTTP path to proxy in the format \"/prefix/=http://target/to\", can be used multiple times", func(s string) error {
+		spl := strings.Split(s, "=")
+		if len(spl) != 2 {
+			return fmt.Errorf("proxy should be in the format \"/prefix/=http://target/to\"")
+		}
+		options.Proxy[spl[0]] = spl[1]
+		return nil
+	})
 	flag.Parse()
 
 	if options.IPAddress == "" && options.ListenIP == "0.0.0.0" {

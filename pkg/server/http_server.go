@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
@@ -46,6 +48,14 @@ func NewHTTPServer(options *Options) (*HTTPServer, error) {
 	router.Handle("/deregister", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.deregisterHandler))))
 	router.Handle("/poll", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.pollHandler))))
 	router.Handle("/metrics", server.corsMiddleware(server.authMiddleware(http.HandlerFunc(server.metricsHandler))))
+
+	for proxyFrom, proxyTo := range options.Proxy {
+		proxyToUrl, err := url.Parse(proxyTo)
+		if err == nil {
+			router.Handle(proxyFrom, server.logger(http.HandlerFunc(server.proxyHandlerFactory(proxyFrom, proxyToUrl))))
+		}
+	}
+
 	server.tlsserver = http.Server{Addr: options.ListenIP + ":443", Handler: router, ErrorLog: log.New(&noopLogger{}, "", 0)}
 	server.nontlsserver = http.Server{Addr: options.ListenIP + ":80", Handler: router, ErrorLog: log.New(&noopLogger{}, "", 0)}
 	return server, nil
@@ -329,4 +339,37 @@ func (h *HTTPServer) metricsHandler(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_ = jsoniter.NewEncoder(w).Encode(metrics)
+}
+
+func copyHeaders(from *http.Header, to *http.Header) {
+	for k, vv := range *from {
+		for _, v := range vv {
+			to.Add(k, v)
+		}
+	}
+}
+
+// proxyHandler is a handler for user-defined endpoints
+func (h *HTTPServer) proxyHandlerFactory(proxyFrom string, proxyToUrl *url.URL) func(http.ResponseWriter, *http.Request) {
+	return func(w http.ResponseWriter, req *http.Request) {
+		proxyUrl := *proxyToUrl
+		proxyUrl.Path = strings.Replace(req.URL.Path, proxyFrom, proxyToUrl.Path, 1)
+		proxyReq, err := http.NewRequest(req.Method, proxyUrl.String(), req.Body)
+		if err != nil {
+			http.Error(w, "Server Error", http.StatusInternalServerError)
+			gologger.Error().Msgf("Could not create proxy request: %s\n", err)
+		}
+		copyHeaders(&req.Header, &proxyReq.Header)
+		client := &http.Client{}
+		resp, err := client.Do(proxyReq)
+		if err != nil {
+			http.Error(w, "Server Error", http.StatusInternalServerError)
+			gologger.Error().Msgf("Could not proxy: %s\n", err)
+		}
+		defer resp.Body.Close()
+		outHeader := w.Header()
+		copyHeaders(&resp.Header, &outHeader)
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}
 }
